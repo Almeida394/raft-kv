@@ -19,7 +19,7 @@ func newIsolatedNode(t *testing.T, id raft.NodeID) *raft.Raft {
 		ID:                 id,
 		Peers:              nil,
 		Transport:          network.Endpoint(id),
-		HardStateDir:       t.TempDir(),
+		DataDir:            t.TempDir(),
 		ElectionTimeoutMin: 50 * time.Millisecond,
 		ElectionTimeoutMax: 100 * time.Millisecond,
 		HeartbeatInterval:  15 * time.Millisecond,
@@ -28,6 +28,7 @@ func newIsolatedNode(t *testing.T, id raft.NodeID) *raft.Raft {
 		t.Fatalf("NewRaft: %v", err)
 	}
 	network.Register(id, node)
+	t.Cleanup(func() { node.Stop() }) // releases the WAL file handle
 	return node
 }
 

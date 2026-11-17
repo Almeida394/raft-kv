@@ -39,7 +39,7 @@ func (r *Raft) tick() {
 	case role != Leader && electionExpired:
 		r.startElection()
 	case heartbeatDue:
-		go r.broadcastHeartbeats(term)
+		go r.replicate(term)
 	}
 }
 
@@ -130,9 +130,10 @@ func (r *Raft) becomeFollowerLocked(term Term) {
 	_ = r.persistHardStateLocked()
 }
 
-// becomeLeaderLocked promotes the node to Leader for its current term and
-// immediately broadcasts a heartbeat so followers don't time out waiting
-// to find out.
+// becomeLeaderLocked promotes the node to Leader for its current term,
+// appends a no-op entry to establish a commit point in the new term (see
+// tryAdvanceCommitIndexLocked), and immediately triggers replication so
+// followers don't time out waiting to find out.
 func (r *Raft) becomeLeaderLocked() {
 	if r.role == Leader {
 		return
@@ -148,50 +149,15 @@ func (r *Raft) becomeLeaderLocked() {
 		r.matchIndex[p] = 0
 	}
 
+	if _, err := r.proposeLocked(nil); err != nil {
+		r.logf("append no-op leader entry: %v", err)
+	}
+	r.tryAdvanceCommitIndexLocked() // covers the no-peers / single-node case
+
 	r.nextHeartbeat = time.Now().Add(r.heartbeatInterval)
 	term := r.currentTerm
 	r.logf("became leader for term %d", term)
-	go r.broadcastHeartbeats(term)
-}
-
-// broadcastHeartbeats sends an empty AppendEntries (heartbeat) to every
-// peer. Log replication (real Entries, nextIndex-driven resends) is added
-// in Phase 3; for now this only asserts leadership and carries the
-// leader's commit index.
-func (r *Raft) broadcastHeartbeats(term Term) {
-	r.mu.Lock()
-	if r.role != Leader || r.currentTerm != term {
-		r.mu.Unlock()
-		return
-	}
-	peers := append([]NodeID(nil), r.peers...)
-	id := r.id
-	commitIndex := r.commitIndex
-	timeout := r.rpcTimeoutLocked()
-	r.mu.Unlock()
-
-	for _, peer := range peers {
-		peer := peer
-		go func() {
-			ctx, cancel := context.WithTimeout(context.Background(), timeout)
-			defer cancel()
-
-			reply, err := r.transport.SendAppendEntries(ctx, peer, &AppendEntriesArgs{
-				Term:         term,
-				LeaderID:     id,
-				LeaderCommit: commitIndex,
-			})
-			if err != nil || reply == nil {
-				return
-			}
-
-			r.mu.Lock()
-			defer r.mu.Unlock()
-			if reply.Term > r.currentTerm {
-				r.becomeFollowerLocked(reply.Term)
-			}
-		}()
-	}
+	go r.replicate(term)
 }
 
 // RequestVote handles an incoming vote request from a candidate.
@@ -223,9 +189,9 @@ func (r *Raft) RequestVote(args *RequestVoteArgs) *RequestVoteReply {
 }
 
 // AppendEntries handles an incoming heartbeat/replication call from the
-// leader. Phase 2 scope: term and leadership bookkeeping only. Log
-// matching, entry appending, and commit-index advancement are added in
-// Phase 3.
+// leader: term/leadership bookkeeping, the log-matching consistency
+// check, appending any new entries (repairing a conflicting suffix
+// first if needed), and advancing commitIndex from the leader's.
 func (r *Raft) AppendEntries(args *AppendEntriesArgs) *AppendEntriesReply {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -242,6 +208,44 @@ func (r *Raft) AppendEntries(args *AppendEntriesArgs) *AppendEntriesReply {
 
 	r.leaderID = args.LeaderID
 	r.resetElectionDeadlineLocked()
+
+	lastIndex := r.lastLogIndexLocked()
+	if args.PrevLogIndex > lastIndex {
+		return &AppendEntriesReply{Term: r.currentTerm, Success: false}
+	}
+	if r.log[args.PrevLogIndex].Term != args.PrevLogTerm {
+		return &AppendEntriesReply{Term: r.currentTerm, Success: false}
+	}
+
+	// PrevLogIndex/PrevLogTerm matched: args.Entries belong right after
+	// it. Any existing entry that conflicts (same index, different
+	// term) means everything from there on must be discarded first;
+	// an existing entry that already matches is left alone (idempotent
+	// re-application of a retried/duplicated RPC).
+	for i, entry := range args.Entries {
+		idx := args.PrevLogIndex + 1 + LogIndex(i)
+		if int(idx) < len(r.log) {
+			if r.log[idx].Term == entry.Term {
+				continue
+			}
+			r.truncateLogLocked(idx)
+		}
+		if err := r.appendLogEntryLocked(entry); err != nil {
+			r.logf("append replicated entry %d: %v", idx, err)
+			return &AppendEntriesReply{Term: r.currentTerm, Success: false}
+		}
+	}
+
+	if args.LeaderCommit > r.commitIndex {
+		newCommit := args.LeaderCommit
+		if last := r.lastLogIndexLocked(); newCommit > last {
+			newCommit = last
+		}
+		if newCommit > r.commitIndex {
+			r.commitIndex = newCommit
+			r.signalApply()
+		}
+	}
 
 	return &AppendEntriesReply{Term: r.currentTerm, Success: true}
 }

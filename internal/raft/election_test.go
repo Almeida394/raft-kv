@@ -34,7 +34,7 @@ func newTestCluster(t *testing.T, n int) ([]*raft.Raft, *rafttest.Network) {
 			ID:                 id,
 			Peers:              peers,
 			Transport:          network.Endpoint(id),
-			HardStateDir:       t.TempDir(),
+			DataDir:            t.TempDir(),
 			ElectionTimeoutMin: 50 * time.Millisecond,
 			ElectionTimeoutMax: 100 * time.Millisecond,
 			HeartbeatInterval:  15 * time.Millisecond,
