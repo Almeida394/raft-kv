@@ -1,0 +1,9 @@
+/bin/
+/dist/
+*.exe
+*.test
+*.out
+*.wal
+*.snap
+/data/
+.env
