@@ -32,12 +32,16 @@ func NewClient(addresses map[raft.NodeID]string) *Client {
 	}
 }
 
-func (c *Client) stubFor(target raft.NodeID) (raftpb.RaftTransportClient, error) {
+// ConnFor returns the (lazily-dialed, shared, reused) gRPC connection to
+// target, so other services hosted on that same peer's gRPC server (e.g.
+// the client-facing KV service in internal/api, when a non-leader node
+// forwards a request to the leader) don't need their own connection pool.
+func (c *Client) ConnFor(target raft.NodeID) (*grpc.ClientConn, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	if conn, ok := c.conns[target]; ok {
-		return raftpb.NewRaftTransportClient(conn), nil
+		return conn, nil
 	}
 
 	addr, ok := c.addresses[target]
@@ -53,6 +57,14 @@ func (c *Client) stubFor(target raft.NodeID) (raftpb.RaftTransportClient, error)
 		return nil, fmt.Errorf("transport: create client for %s (%s): %w", target, addr, err)
 	}
 	c.conns[target] = conn
+	return conn, nil
+}
+
+func (c *Client) stubFor(target raft.NodeID) (raftpb.RaftTransportClient, error) {
+	conn, err := c.ConnFor(target)
+	if err != nil {
+		return nil, err
+	}
 	return raftpb.NewRaftTransportClient(conn), nil
 }
 

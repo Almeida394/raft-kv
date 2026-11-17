@@ -7,12 +7,12 @@ A distributed key-value store in Go, with a Raft consensus implementation writte
 ## Status
 
 - [x] Project scaffold
-- [ ] Write-ahead log + KV storage engine
-- [ ] Leader election
-- [ ] Log replication
-- [ ] Snapshots & log compaction
-- [ ] gRPC transport
-- [ ] HTTP + gRPC client API
+- [x] Write-ahead log + KV storage engine
+- [x] Leader election
+- [x] Log replication
+- [x] Snapshots & log compaction
+- [x] gRPC transport
+- [ ] HTTP + gRPC client API (in progress)
 - [ ] Fault-injection tests
 - [ ] Benchmarks
 - [ ] Docker Compose cluster
