@@ -50,7 +50,7 @@ func SaveHardState(dir string, hs HardState) error {
 	if err := f.Close(); err != nil {
 		return fmt.Errorf("close temp hardstate: %w", err)
 	}
-	if err := os.Rename(tmp, final); err != nil {
+	if err := RenameWithRetry(tmp, final); err != nil {
 		return fmt.Errorf("rename hardstate: %w", err)
 	}
 	return nil

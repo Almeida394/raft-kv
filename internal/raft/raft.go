@@ -33,6 +33,18 @@ type Config struct {
 	// the leader appends on election are not passed to ApplyFn.
 	ApplyFn func(LogEntry)
 
+	// StateMachine, if set, enables snapshotting: Snapshot() is called
+	// to produce a durable point-in-time copy of applied state once
+	// SnapshotThreshold entries have been applied past the last
+	// snapshot, and Restore() is called once at startup if a previous
+	// snapshot exists. storage.KVStore satisfies this interface.
+	StateMachine StateMachine
+
+	// SnapshotThreshold is how many entries may be applied past the
+	// last snapshot before a new one is taken. Zero disables
+	// snapshotting even if StateMachine is set.
+	SnapshotThreshold int
+
 	// ElectionTimeoutMin/Max bound the randomized election timeout.
 	// Defaults: 150ms / 300ms.
 	ElectionTimeoutMin time.Duration
@@ -77,6 +89,17 @@ type Raft struct {
 	// log[i+1]'s record (logOffsets has no entry for the sentinel).
 	log        []LogEntry
 	logOffsets []int64
+
+	// lastIncludedIndex/Term describe the most recent snapshot: entries
+	// up to and including lastIncludedIndex are not kept in log/WAL at
+	// all, only reflected in the state machine. log[0] is always a
+	// sentinel for (lastIncludedIndex, lastIncludedTerm); a position in
+	// the log slice maps to an absolute index via
+	// pos = index - lastIncludedIndex.
+	lastIncludedIndex LogIndex
+	lastIncludedTerm  Term
+	stateMachine      StateMachine
+	snapshotThreshold int
 
 	// Volatile state.
 	role        Role
@@ -135,6 +158,11 @@ func NewRaft(cfg Config) (*Raft, error) {
 		return nil, fmt.Errorf("raft: load hard state: %w", err)
 	}
 
+	snap, hasSnapshot, err := storage.LoadSnapshot(cfg.DataDir)
+	if err != nil {
+		return nil, fmt.Errorf("raft: load snapshot: %w", err)
+	}
+
 	wal, err := storage.OpenWAL(filepath.Join(cfg.DataDir, "raft.wal"))
 	if err != nil {
 		return nil, fmt.Errorf("raft: open wal: %w", err)
@@ -144,12 +172,29 @@ func NewRaft(cfg Config) (*Raft, error) {
 		return nil, fmt.Errorf("raft: read wal: %w", err)
 	}
 
+	var lastIncludedIndex LogIndex
+	var lastIncludedTerm Term
 	raftLog := []LogEntry{{Term: 0, Index: 0}}
+
+	if hasSnapshot {
+		lastIncludedIndex = LogIndex(snap.LastIncludedIndex)
+		lastIncludedTerm = Term(snap.LastIncludedTerm)
+		raftLog = []LogEntry{{Term: lastIncludedTerm, Index: lastIncludedIndex}}
+		if cfg.StateMachine != nil {
+			if err := cfg.StateMachine.Restore(snap.Data); err != nil {
+				return nil, fmt.Errorf("raft: restore snapshot into state machine: %w", err)
+			}
+		}
+	}
+
 	offsets := make([]int64, 0, len(records))
 	for _, rec := range records {
 		entry, err := decodeLogEntry(rec.Payload)
 		if err != nil {
 			return nil, fmt.Errorf("raft: decode persisted log entry: %w", err)
+		}
+		if entry.Index <= lastIncludedIndex {
+			continue // covered by the snapshot already restored above
 		}
 		raftLog = append(raftLog, entry)
 		offsets = append(offsets, rec.Offset)
@@ -183,6 +228,12 @@ func NewRaft(cfg Config) (*Raft, error) {
 		role:               Follower,
 		log:                raftLog,
 		logOffsets:         offsets,
+		lastIncludedIndex:  lastIncludedIndex,
+		lastIncludedTerm:   lastIncludedTerm,
+		stateMachine:       cfg.StateMachine,
+		snapshotThreshold:  cfg.SnapshotThreshold,
+		commitIndex:        lastIncludedIndex,
+		lastApplied:        lastIncludedIndex,
 		applyFn:            cfg.ApplyFn,
 		applyCh:            make(chan struct{}, 1),
 		stopCh:             make(chan struct{}),
@@ -216,9 +267,14 @@ func (r *Raft) Stop() {
 		return
 	}
 	r.stopped = true
+	// Captured under the same lock as the stopped flag: compactWALLocked
+	// refuses to run once stopped is true, so this is guaranteed to be
+	// the final WAL handle this node will ever use.
+	wal := r.wal
 	r.mu.Unlock()
+
 	close(r.stopCh)
-	_ = r.wal.Close()
+	_ = wal.Close()
 }
 
 // ID returns the node's own identifier.
@@ -249,11 +305,21 @@ func (r *Raft) CommitIndex() LogIndex {
 }
 
 // LogEntries returns a copy of the node's log, including the sentinel at
-// index 0. It's meant for tests and debugging, not the hot path.
+// index 0 (which, after a snapshot, represents lastIncludedIndex/Term
+// rather than literal index/term 0). It's meant for tests and debugging,
+// not the hot path.
 func (r *Raft) LogEntries() []LogEntry {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return append([]LogEntry(nil), r.log...)
+}
+
+// SnapshotInfo returns the index and term of the most recent snapshot
+// (zero values if none has been taken yet).
+func (r *Raft) SnapshotInfo() (LogIndex, Term) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.lastIncludedIndex, r.lastIncludedTerm
 }
 
 func (r *Raft) lastLogIndexTermLocked() (LogIndex, Term) {
@@ -310,17 +376,21 @@ func (r *Raft) proposeLocked(command []byte) (LogEntry, error) {
 
 // truncateLogLocked discards fromIndex and everything after it, both from
 // the WAL and the in-memory log, used when a follower's log conflicts
-// with the leader's and must be repaired.
+// with the leader's and must be repaired. fromIndex is an absolute log
+// index; pos converts it to a position in the in-memory slice, which
+// only matches fromIndex directly before any snapshot has shifted the
+// base (see lastIncludedIndex).
 func (r *Raft) truncateLogLocked(fromIndex LogIndex) {
-	if fromIndex < 1 || int(fromIndex) >= len(r.log) {
+	pos := int(fromIndex - r.lastIncludedIndex)
+	if pos < 1 || pos >= len(r.log) {
 		return
 	}
-	offset := r.logOffsets[fromIndex-1]
+	offset := r.logOffsets[pos-1]
 	if err := r.wal.Truncate(offset); err != nil {
 		r.logf("truncate wal at offset %d: %v", offset, err)
 	}
-	r.log = r.log[:fromIndex]
-	r.logOffsets = r.logOffsets[:fromIndex-1]
+	r.log = r.log[:pos]
+	r.logOffsets = r.logOffsets[:pos-1]
 }
 
 func (r *Raft) resetElectionDeadlineLocked() {
@@ -364,18 +434,22 @@ func (r *Raft) runApplyLoop() {
 func (r *Raft) applyPending() {
 	for {
 		r.mu.Lock()
-		if r.lastApplied >= r.commitIndex {
+		if r.stopped || r.lastApplied >= r.commitIndex {
 			r.mu.Unlock()
 			return
 		}
 		r.lastApplied++
-		entry := r.log[r.lastApplied]
+		entry := r.log[int(r.lastApplied-r.lastIncludedIndex)]
 		fn := r.applyFn
 		r.mu.Unlock()
 
 		if fn != nil && len(entry.Command) > 0 {
 			fn(entry)
 		}
+
+		r.mu.Lock()
+		r.maybeSnapshotLocked()
+		r.mu.Unlock()
 	}
 }
 

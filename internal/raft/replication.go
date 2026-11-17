@@ -63,14 +63,24 @@ func (r *Raft) replicateTo(peer NodeID, term Term, timeout time.Duration) {
 	if nextIdx < 1 {
 		nextIdx = 1
 	}
+
+	if nextIdx <= r.lastIncludedIndex {
+		// Whatever this follower needs has already been compacted out
+		// of our log; it has to catch up via a full snapshot instead.
+		r.mu.Unlock()
+		r.sendInstallSnapshotTo(peer, term, timeout)
+		return
+	}
+
 	prevLogIndex := nextIdx - 1
+	prevPos := int(prevLogIndex - r.lastIncludedIndex)
 	var prevLogTerm Term
-	if int(prevLogIndex) < len(r.log) {
-		prevLogTerm = r.log[prevLogIndex].Term
+	if prevPos >= 0 && prevPos < len(r.log) {
+		prevLogTerm = r.log[prevPos].Term
 	}
 	var entries []LogEntry
-	if int(nextIdx) < len(r.log) {
-		entries = append([]LogEntry(nil), r.log[nextIdx:]...)
+	if curPos := int(nextIdx - r.lastIncludedIndex); curPos >= 0 && curPos < len(r.log) {
+		entries = append([]LogEntry(nil), r.log[curPos:]...)
 	}
 	leaderCommit := r.commitIndex
 	id := r.id
@@ -121,6 +131,59 @@ func (r *Raft) replicateTo(peer NodeID, term Term, timeout time.Duration) {
 	}
 }
 
+// sendInstallSnapshotTo sends the leader's current snapshot to peer when
+// the entries it needs have already been compacted out of the leader's
+// log, then advances its nextIndex/matchIndex past what the snapshot
+// already covers.
+func (r *Raft) sendInstallSnapshotTo(peer NodeID, term Term, timeout time.Duration) {
+	r.mu.Lock()
+	if r.role != Leader || r.currentTerm != term || r.stateMachine == nil {
+		r.mu.Unlock()
+		return
+	}
+	data, err := r.stateMachine.Snapshot()
+	if err != nil {
+		r.logf("install snapshot to %s: snapshot state machine: %v", peer, err)
+		r.mu.Unlock()
+		return
+	}
+	args := &InstallSnapshotArgs{
+		Term:              term,
+		LeaderID:          r.id,
+		LastIncludedIndex: r.lastIncludedIndex,
+		LastIncludedTerm:  r.lastIncludedTerm,
+		Data:              data,
+	}
+	r.mu.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	reply, err := r.transport.SendInstallSnapshot(ctx, peer, args)
+	if err != nil || reply == nil {
+		return
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if reply.Term > r.currentTerm {
+		r.becomeFollowerLocked(reply.Term)
+		return
+	}
+	if r.role != Leader || r.currentTerm != term {
+		return
+	}
+
+	if args.LastIncludedIndex+1 > r.nextIndex[peer] {
+		r.nextIndex[peer] = args.LastIncludedIndex + 1
+	}
+	if args.LastIncludedIndex > r.matchIndex[peer] {
+		r.matchIndex[peer] = args.LastIncludedIndex
+	}
+	r.tryAdvanceCommitIndexLocked()
+}
+
 // tryAdvanceCommitIndexLocked checks whether some index is now present on
 // a majority of nodes (self included) *in the leader's current term* —
 // Raft never commits entries from older terms purely by counting
@@ -141,8 +204,9 @@ func (r *Raft) tryAdvanceCommitIndexLocked() {
 
 	majority := len(indices)/2 + 1
 	candidate := indices[len(indices)-majority]
+	candidatePos := int(candidate - r.lastIncludedIndex)
 
-	if candidate > r.commitIndex && r.log[candidate].Term == r.currentTerm {
+	if candidate > r.commitIndex && candidatePos >= 0 && candidatePos < len(r.log) && r.log[candidatePos].Term == r.currentTerm {
 		r.commitIndex = candidate
 		r.signalApply()
 	}

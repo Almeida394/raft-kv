@@ -165,6 +165,13 @@ func (r *Raft) RequestVote(args *RequestVoteArgs) *RequestVoteReply {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
+	if r.stopped {
+		// A stopped node simulates a crashed/killed process: it must
+		// not still answer RPCs or touch disk, even if a request from
+		// a goroutine that started before it stopped arrives late.
+		return &RequestVoteReply{Term: r.currentTerm, VoteGranted: false}
+	}
+
 	if args.Term < r.currentTerm {
 		return &RequestVoteReply{Term: r.currentTerm, VoteGranted: false}
 	}
@@ -196,6 +203,10 @@ func (r *Raft) AppendEntries(args *AppendEntriesArgs) *AppendEntriesReply {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
+	if r.stopped {
+		return &AppendEntriesReply{Term: r.currentTerm, Success: false}
+	}
+
 	if args.Term < r.currentTerm {
 		return &AppendEntriesReply{Term: r.currentTerm, Success: false}
 	}
@@ -213,7 +224,15 @@ func (r *Raft) AppendEntries(args *AppendEntriesArgs) *AppendEntriesReply {
 	if args.PrevLogIndex > lastIndex {
 		return &AppendEntriesReply{Term: r.currentTerm, Success: false}
 	}
-	if r.log[args.PrevLogIndex].Term != args.PrevLogTerm {
+	// PrevLogIndex before our snapshot base can't be verified against
+	// our (now-compacted) log; this shouldn't happen given the leader
+	// only falls back to InstallSnapshot once nextIndex reaches that
+	// point, but reject conservatively if it ever does.
+	prevPos := int(args.PrevLogIndex - r.lastIncludedIndex)
+	if prevPos < 0 {
+		return &AppendEntriesReply{Term: r.currentTerm, Success: false}
+	}
+	if r.log[prevPos].Term != args.PrevLogTerm {
 		return &AppendEntriesReply{Term: r.currentTerm, Success: false}
 	}
 
@@ -224,8 +243,9 @@ func (r *Raft) AppendEntries(args *AppendEntriesArgs) *AppendEntriesReply {
 	// re-application of a retried/duplicated RPC).
 	for i, entry := range args.Entries {
 		idx := args.PrevLogIndex + 1 + LogIndex(i)
-		if int(idx) < len(r.log) {
-			if r.log[idx].Term == entry.Term {
+		pos := int(idx - r.lastIncludedIndex)
+		if pos < len(r.log) {
+			if r.log[pos].Term == entry.Term {
 				continue
 			}
 			r.truncateLogLocked(idx)

@@ -140,3 +140,14 @@ func (e *endpoint) SendAppendEntries(ctx context.Context, to raft.NodeID, args *
 	}
 	return h.AppendEntries(args), nil
 }
+
+func (e *endpoint) SendInstallSnapshot(ctx context.Context, to raft.NodeID, args *raft.InstallSnapshotArgs) (*raft.InstallSnapshotReply, error) {
+	if err := e.wait(ctx, to); err != nil {
+		return nil, err
+	}
+	h, ok := e.net.handlerFor(to)
+	if !ok {
+		return nil, ErrUnreachable
+	}
+	return h.InstallSnapshot(args), nil
+}

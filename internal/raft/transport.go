@@ -8,6 +8,7 @@ import "context"
 type RPCHandler interface {
 	RequestVote(args *RequestVoteArgs) *RequestVoteReply
 	AppendEntries(args *AppendEntriesArgs) *AppendEntriesReply
+	InstallSnapshot(args *InstallSnapshotArgs) *InstallSnapshotReply
 }
 
 // Transport is how a Raft node sends RPCs to a peer. There are two
@@ -18,4 +19,5 @@ type RPCHandler interface {
 type Transport interface {
 	SendRequestVote(ctx context.Context, target NodeID, args *RequestVoteArgs) (*RequestVoteReply, error)
 	SendAppendEntries(ctx context.Context, target NodeID, args *AppendEntriesArgs) (*AppendEntriesReply, error)
+	SendInstallSnapshot(ctx context.Context, target NodeID, args *InstallSnapshotArgs) (*InstallSnapshotReply, error)
 }
