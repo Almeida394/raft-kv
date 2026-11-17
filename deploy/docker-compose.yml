@@ -1,0 +1,76 @@
+# Brings up a 3-node raft-kv cluster with one command:
+#
+#   docker compose -f deploy/docker-compose.yml up --build
+#
+# Each node's HTTP API is published on a different host port
+# (node1: 8001, node2: 8002, node3: 8003) so you can PUT/GET/DELETE
+# against any of them - a non-leader node forwards the request to
+# whichever node is currently leader. Inter-node Raft + gRPC traffic
+# (port 7000 in every container) stays inside the compose network and
+# isn't published to the host.
+#
+# To run a 5-node cluster instead, copy the node4/node5 blocks below
+# (bumping -id, the volume name, and the host port), and add them to
+# every node's -peers list.
+services:
+  node1:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: raftkv-node1
+    command:
+      - -id=node1
+      - -data-dir=/data
+      - -raft-addr=0.0.0.0:7000
+      - -http-addr=0.0.0.0:8000
+      - -peers=node2=node2:7000=node2:8000,node3=node3:7000=node3:8000
+    volumes:
+      - node1-data:/data
+    ports:
+      - "8001:8000"
+    networks:
+      - raftkv
+
+  node2:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: raftkv-node2
+    command:
+      - -id=node2
+      - -data-dir=/data
+      - -raft-addr=0.0.0.0:7000
+      - -http-addr=0.0.0.0:8000
+      - -peers=node1=node1:7000=node1:8000,node3=node3:7000=node3:8000
+    volumes:
+      - node2-data:/data
+    ports:
+      - "8002:8000"
+    networks:
+      - raftkv
+
+  node3:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: raftkv-node3
+    command:
+      - -id=node3
+      - -data-dir=/data
+      - -raft-addr=0.0.0.0:7000
+      - -http-addr=0.0.0.0:8000
+      - -peers=node1=node1:7000=node1:8000,node2=node2:7000=node2:8000
+    volumes:
+      - node3-data:/data
+    ports:
+      - "8003:8000"
+    networks:
+      - raftkv
+
+networks:
+  raftkv:
+
+volumes:
+  node1-data:
+  node2-data:
+  node3-data:

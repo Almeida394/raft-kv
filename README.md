@@ -12,7 +12,8 @@ A distributed key-value store in Go, with a Raft consensus implementation writte
 - [x] Log replication
 - [x] Snapshots & log compaction
 - [x] gRPC transport
-- [ ] HTTP + gRPC client API (in progress)
-- [ ] Fault-injection tests
-- [ ] Benchmarks
-- [ ] Docker Compose cluster
+- [x] HTTP + gRPC client API
+- [x] Fault-injection tests
+- [x] Benchmarks
+- [x] Docker Compose cluster
+- [ ] Final README pass (architecture diagram, trade-offs, limitations)
