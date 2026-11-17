@@ -50,6 +50,11 @@ func (r *Raft) startElection() {
 	r.mu.Lock()
 	r.currentTerm++
 	r.role = Candidate
+	// A node starting an election no longer trusts that the last
+	// leader it knew about is still reachable/current - callers (e.g.
+	// the API layer deciding where to forward a request) must not be
+	// told about a leader we ourselves now doubt exists.
+	r.leaderID = ""
 	r.votedFor = r.id
 	term := r.currentTerm
 	lastLogIndex, lastLogTerm := r.lastLogIndexTermLocked()
