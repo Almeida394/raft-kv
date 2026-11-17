@@ -37,12 +37,12 @@ func newSnapshottingCluster(t *testing.T, n, snapshotThreshold int) ([]*raft.Raf
 		kvs[i] = kv
 
 		node, err := raft.NewRaft(raft.Config{
-			ID:                 id,
-			Peers:              peers,
-			Transport:          network.Endpoint(id),
-			DataDir:            t.TempDir(),
-			StateMachine:       kv,
-			SnapshotThreshold:  snapshotThreshold,
+			ID:                id,
+			Peers:             peers,
+			Transport:         network.Endpoint(id),
+			DataDir:           t.TempDir(),
+			StateMachine:      kv,
+			SnapshotThreshold: snapshotThreshold,
 			ApplyFn: func(e raft.LogEntry) {
 				cmd, err := storage.DecodeCommand(e.Command)
 				if err != nil {
@@ -216,12 +216,12 @@ func TestNode_RestartRestoresStateFromSnapshotAndTailLog(t *testing.T) {
 	kv := storage.NewKVStore()
 
 	node, err := raft.NewRaft(raft.Config{
-		ID:                 "solo",
-		Peers:              nil,
-		Transport:          network.Endpoint("solo"),
-		DataDir:            dataDir,
-		StateMachine:       kv,
-		SnapshotThreshold:  3,
+		ID:                "solo",
+		Peers:             nil,
+		Transport:         network.Endpoint("solo"),
+		DataDir:           dataDir,
+		StateMachine:      kv,
+		SnapshotThreshold: 3,
 		ApplyFn: func(e raft.LogEntry) {
 			cmd, err := storage.DecodeCommand(e.Command)
 			if err != nil {
@@ -259,12 +259,12 @@ func TestNode_RestartRestoresStateFromSnapshotAndTailLog(t *testing.T) {
 	kv2 := storage.NewKVStore()
 	network2 := rafttest.NewNetwork()
 	node2, err := raft.NewRaft(raft.Config{
-		ID:                 "solo",
-		Peers:              nil,
-		Transport:          network2.Endpoint("solo"),
-		DataDir:            dataDir,
-		StateMachine:       kv2,
-		SnapshotThreshold:  3,
+		ID:                "solo",
+		Peers:             nil,
+		Transport:         network2.Endpoint("solo"),
+		DataDir:           dataDir,
+		StateMachine:      kv2,
+		SnapshotThreshold: 3,
 		ApplyFn: func(e raft.LogEntry) {
 			cmd, err := storage.DecodeCommand(e.Command)
 			if err != nil {

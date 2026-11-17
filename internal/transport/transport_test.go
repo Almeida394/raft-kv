@@ -47,10 +47,10 @@ func TestGRPCTransport_ElectsLeaderAndReplicatesOverRealNetwork(t *testing.T) {
 		kvs[i] = kv
 
 		node, err := raft.NewRaft(raft.Config{
-			ID:                 id,
-			Peers:              peers,
-			Transport:          client,
-			DataDir:            t.TempDir(),
+			ID:        id,
+			Peers:     peers,
+			Transport: client,
+			DataDir:   t.TempDir(),
 			ApplyFn: func(e raft.LogEntry) {
 				cmd, err := storage.DecodeCommand(e.Command)
 				if err != nil {
